@@ -1,2 +1,4 @@
-Flask>=2.0
-aiohttp>=3.8
+httpx>=0.27
+curl_cffi>=0.16
+fastapi
+uvicorn
